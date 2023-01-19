@@ -1,6 +1,6 @@
 # Topic: HOP Airdrop
 
-HOP is a bridge exchange across EVM blockchains and L2s like Ethereum, Optimism, and Polygon. They launched their HOP token to retroactive users and use it to boost rewards to liquidity providers on their bridge.
+[HOP](https://hop.exchange/) is a bridge exchange across EVM blockchains and L2s like Ethereum, Optimism, and Polygon. They launched their HOP token to retroactive users and use it to boost rewards to liquidity providers on their bridge.
 
 For a deeper dive into the context, you can check out the report on our [research site](https://science.flipsidecrypto.xyz/research/) at [hop-drop](https://science.flipsidecrypto.xyz/hopdrop/).
 
