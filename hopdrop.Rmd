@@ -1,6 +1,6 @@
 ---
-title: " Title "
-author: " Author "
+title: "What did HOP Airdrop Claimers do after?"
+author: "Charliemarketplace"
 date: "`r Sys.Date()`"
 output:
   html_document:
@@ -14,21 +14,549 @@ editor_options:
   chunk_output_type: console
 ---
 
+FlipsideCrypto's Research is open source. Check out all the code for this report [here](https://github.com/FlipsideCrypto/hopdrop) on github.
+
 # Intro
 
-This is the Flipside Crypto RMarkdown template. It includes an renv lockfile with shroomDK. 
-Please ensure renv is installed on your machine and use the provided chunk (click Show Code) to begin.
+This is an example analysis to identify how addresses that (1) claimed HOP tokens 
+used their HOP, including:
 
-To use this template: 
+General Airdrop Actions: 
 
-1. Clone this repo into a new repo
-2. Rename the R Project
-3. Rename the template Rmd file
-4. Restore the r environment
-5. Push your new repo with new file names.
-6. Begin working! You can edit the header, footer, and styles.css file as needed, some defaults are provided. Use Knit to HTML to view the effects of these defaults.
+- Retained their claim
+- Transfer their claim
+- Sell their claim on a DEX
+- Buy more HOP on a DEX
+- Deposit their claim into DEX Liquidity Pool(s)
 
-```{r}
-renv::restore()
+Airdrop specific Actions:
+- Earn more HOP via Hop cross-chain LP
+
+# Airdrop Recipients
+
+```{r, warning = FALSE, message = FALSE}
 library(shroomDK)
+library(reactable)
+library(ggplot2)
+library(plotly)
+library(lubridate)
+library(dplyr)
+
+hop_claimers_query <- {
+  "
+  with airdrops AS (
+ -- HOP Claim
+ SELECT LOWER('0xc5102fe9359fd9a28f877a67e36b0f050d81a3cc') as CONTRACT_ADDRESS, 'TOKENSYMBOL' as SYMBOL, LOWER('0x76122903') as ORIGIN_FUNCTION_SIGNATURE FROM DUAL
+),
+
+airdrop_claimants AS (
+SELECT TX_HASH, CONTRACT_ADDRESS, FROM_ADDRESS, TO_ADDRESS, SYMBOL, ORIGIN_FUNCTION_SIGNATURE, AMOUNT, AMOUNT_USD
+  FROM ethereum.core.ez_token_transfers
+WHERE CONTRACT_ADDRESS IN (SELECT CONTRACT_ADDRESS FROM airdrops) AND 
+ORIGIN_FUNCTION_SIGNATURE IN (SELECT ORIGIN_FUNCTION_SIGNATURE FROM airdrops) AND 
+BLOCK_NUMBER <= 16400000
+)
+
+SELECT TO_ADDRESS as user_address, contract_address as token_contract, symbol as token_symbol, 
+COUNT(*) as n_airdrops_claimed, SUM(AMOUNT) as claimed_token_volume, SUM(AMOUNT_USD) as claimed_usd_volume 
+FROM airdrop_claimants
+GROUP BY user_address, token_contract, token_symbol
+  "
+}
+
+hop_claimers <- auto_paginate_query(hop_claimers_query, api_key = readLines("api_key.txt"))
+
 ```
+
+Looking at all HOP claimers on or before block 16400000 (Jan 13 2023) for reproducibility 
+of analysis there are `r length(unique(hop_claimers$USER_ADDRESS))` unique addresses that claimed HOP 
+with a median claim amount of `r median(hop_claimers$CLAIMED_TOKEN_VOLUME)` and an average of 
+`r mean(hop_claimers$CLAIMED_TOKEN_VOLUME)`.
+
+```{r, warning = FALSE, message = FALSE}
+plot_ly(data = hop_claimers, x = ~CLAIMED_TOKEN_VOLUME, type = 'histogram') %>% 
+  layout(
+    title = list(text = "The typical airdrop was ~1200 HOP", y = 0.95), 
+      xaxis = list(title = "# Tokens Claimed", range = c(0,50000)),
+         yaxis = list(title = "# of Claimants in Range", range = c(0, 10000)))
+
+```
+
+## General Churn 
+
+Getting claimer balances as of BLOCK_NUMBER = 16400000 to identify how quickly balances of recipients fell to < 1 (i.e., 0 or dust), focusing specifically on those that claimed >= 1 HOP (ignoring those that claimed dust amounts).
+
+```{r, warning = FALSE, message = FALSE}
+
+bal_query <- {
+  "
+ with airdrops AS (
+ -- HOP Claim
+ SELECT LOWER('0xc5102fe9359fd9a28f877a67e36b0f050d81a3cc') as CONTRACT_ADDRESS, 'TOKENSYMBOL' as SYMBOL, LOWER('0x76122903') as ORIGIN_FUNCTION_SIGNATURE FROM DUAL
+),
+
+airdrop_claimants AS (
+SELECT TX_HASH, CONTRACT_ADDRESS, FROM_ADDRESS, TO_ADDRESS, SYMBOL, ORIGIN_FUNCTION_SIGNATURE, AMOUNT, AMOUNT_USD
+  FROM ethereum.core.ez_token_transfers
+WHERE CONTRACT_ADDRESS IN (SELECT CONTRACT_ADDRESS FROM airdrops) AND 
+ORIGIN_FUNCTION_SIGNATURE IN (SELECT ORIGIN_FUNCTION_SIGNATURE FROM airdrops) AND 
+BLOCK_NUMBER <= 16400000
+),
+
+claimant_details AS (SELECT TO_ADDRESS as user_address, contract_address as token_contract, symbol as token_symbol, 
+COUNT(*) as n_airdrops_claimed, SUM(AMOUNT) as claimed_token_volume, SUM(AMOUNT_USD) as claimed_usd_volume 
+FROM airdrop_claimants
+GROUP BY user_address, token_contract, token_symbol),
+
+typical_users AS (
+SELECT * FROM claimant_details WHERE 
+claimed_token_volume >= 1
+),
+
+--user_address | token_contract | token_symbol | tw_token_balance
+block_tracked AS (
+    SELECT USER_ADDRESS as address,
+           CONTRACT_ADDRESS as token_address,
+           symbol as token_symbol,
+           BLOCK_NUMBER as block,
+	       BLOCK_TIMESTAMP,
+           PREV_BAL as old_value,
+           CURRENT_BAL as new_value
+    FROM ETHEREUM.CORE.EZ_BALANCE_DELTAS
+    WHERE BLOCK_NUMBER <= 16400000
+    AND token_address = LOWER('0xc5102fe9359fd9a28f877a67e36b0f050d81a3cc') 
+    AND USER_ADDRESS IN (SELECT user_address FROM typical_users)
+  ),
+  
+-- group by holder-token
+-- order by block desc
+-- pick most recent block
+-- get holders w/ address type label in case it is a contract
+token_holder AS (
+SELECT *, ROW_NUMBER() over (partition by address, token_address, token_symbol order by block DESC) as rownum
+FROM block_tracked
+)
+  
+SELECT  address as user_address, token_address as token_contract, token_symbol, new_value as token_balance,
+  block as last_balance_change_block, block_timestamp as last_balance_change_date
+FROM token_holder
+    WHERE rownum = 1
+    
+"
+}
+
+claimer_balance <- auto_paginate_query(query = bal_query, api_key = readLines('api_key.txt'))
+
+```
+
+```{r, warning = FALSE, message = FALSE}
+
+hop_balance_0 <- claimer_balance %>% 
+  filter(TOKEN_BALANCE < 1) %>% 
+  mutate(churn_date = ymd(as.Date(LAST_BALANCE_CHANGE_DATE))) %>% 
+  group_by(churn_date) %>% 
+  summarise(num_churners = n())
+
+ymonth <- function(date){
+  y = year(date)
+  m = month(date)
+
+  if(nchar(m) == 1){
+    m <- paste0("0",m)
+  }
+  
+  return(paste0(y,"-",m))
+}
+
+hop_balance_0$churn_month <- sapply(hop_balance_0$churn_date, ymonth)
+
+hop_month_churn <- hop_balance_0 %>% group_by(churn_month) %>% 
+  summarise(total = sum(num_churners))
+
+```
+
+Among the `r round(100 * sum(claimer_balance$TOKEN_BALANCE < 1)/nrow(claimer_balance), 2)`% of claimants (who claimed at least 1 HOP) who no longer hold their HOP (hold < 1 HOP as of the timestamp), `r hop_month_churn$total[hop_month_churn$churn_month == '2022-06']` moved/sold/deposited in June 2022.
+
+```{r, warning = FALSE, message = FALSE}
+plot_ly(data = hop_month_churn,
+        x = ~total, 
+        y = ~churn_month, 
+        type = 'bar') %>% 
+  layout(
+    title = list(text = "Of the 62% that dumped, most did so immediately.",
+                 y = 0.95),
+    xaxis = list(title = "# Claimants Cashing Out"),
+    yaxis = list(title = "Year-Month")
+  )
+
+```
+
+## Accumulatooooors
+
+```{r, warning = FALSE, message = FALSE}
+hop_merge <- merge(claimer_balance[, c("USER_ADDRESS","TOKEN_BALANCE")], 
+                     hop_claimers[, c("USER_ADDRESS", "CLAIMED_TOKEN_VOLUME")],
+                   by = "USER_ADDRESS", all.x = TRUE)
+
+```
+
+`r round(100*ecdf(hop_merge$CLAIMED_TOKEN_VOLUME)(5000), 2)`% of claimers, claimed 5,000
+or less HOP. Focusing on this group:
+
+```{r, warning = FALSE, message = FALSE}
+
+plot_ly(alpha = 0.45,
+        data = hop_merge %>% filter(CLAIMED_TOKEN_VOLUME <= 5000),
+        x = ~(TOKEN_BALANCE - CLAIMED_TOKEN_VOLUME),
+        nbinsx = 50000,
+        name = "",
+        type = "histogram"
+)  %>%
+  layout(
+    barmode = "overlay",
+    title = list(text = "Change in HOP Balance among Typical Claimers (<= 5K claimed)", y = 0.975),
+    xaxis = list(title = "HOP Accumulated (Current - Claimed)", range = c(-5000, 5000)),
+    yaxis = list(title = "# Claimers", range = c(0, 800))
+  )
+
+```
+
+- `r sum(hop_merge$TOKEN_BALANCE > hop_merge$CLAIMED_TOKEN_VOLUME)` of the typical claimers (<= 5k HOP claimed)
+(`r round(100*sum(hop_merge$TOKEN_BALANCE > hop_merge$CLAIMED_TOKEN_VOLUME)/nrow(hop_merge), 2)`%) currently 
+have **more** HOP than they claimed; 
+
+- `r sum(hop_merge$TOKEN_BALANCE == hop_merge$CLAIMED_TOKEN_VOLUME)` of the typical claimer (<= 5k HOP claimed)
+(`r round(100*sum(hop_merge$TOKEN_BALANCE == hop_merge$CLAIMED_TOKEN_VOLUME)/nrow(hop_merge), 2)`%) have the *exact* same amount as they claimed.
+
+# Actions after Claim 
+
+Breaking down how recipients did:
+
+- Retained their claim
+- Transfer their claim
+- Sell their claim on a DEX
+- Buy more HOP on a DEX
+- Deposit their claim into DEX Liquidity Pool(s)
+
+```{r, warning = FALSE, message = FALSE}
+
+# identify the liquidity pools 
+hop_pools_query <- {
+  "
+-- HOP liquidity pools 
+SELECT POOL_ADDRESS, POOL_NAME, PLATFORM, TOKEN0, TOKEN0_SYMBOL, TOKEN1, TOKEN1_SYMBOL FROM 
+ethereum.core.dim_dex_liquidity_pools WHERE
+TOKEN0 = '0xc5102fe9359fd9a28f877a67e36b0f050d81a3cc' OR TOKEN1 = '0xc5102fe9359fd9a28f877a67e36b0f050d81a3cc'
+  "
+} 
+
+hop_lps <- auto_paginate_query(hop_pools_query, api_key = readLines("api_key.txt"))
+
+# superset of lp deposits, lp withdrawals, trades, simple_transfers
+hop_transfers_query <- {
+  "
+  -- Airdrop claimants
+   with airdrops AS (
+ -- HOP Claim
+ SELECT LOWER('0xc5102fe9359fd9a28f877a67e36b0f050d81a3cc') as CONTRACT_ADDRESS, 'TOKENSYMBOL' as SYMBOL, LOWER('0x76122903') as ORIGIN_FUNCTION_SIGNATURE FROM DUAL
+),
+
+airdrop_claimants AS (
+SELECT TX_HASH, CONTRACT_ADDRESS, FROM_ADDRESS, TO_ADDRESS, SYMBOL, ORIGIN_FUNCTION_SIGNATURE, AMOUNT, AMOUNT_USD
+  FROM ethereum.core.ez_token_transfers
+WHERE CONTRACT_ADDRESS IN (SELECT CONTRACT_ADDRESS FROM airdrops) AND 
+ORIGIN_FUNCTION_SIGNATURE IN (SELECT ORIGIN_FUNCTION_SIGNATURE FROM airdrops) AND 
+BLOCK_NUMBER <= 16400000
+), 
+
+claimants AS (
+SELECT TO_ADDRESS as user_address, contract_address as token_contract, symbol as token_symbol, 
+SUM(AMOUNT) as claimed_token_volume
+FROM airdrop_claimants
+GROUP BY user_address, token_contract, token_symbol
+),
+
+transfers AS (
+SELECT TX_HASH, FROM_ADDRESS, TO_ADDRESS, CONTRACT_ADDRESS, 
+AMOUNT
+FROM ethereum.core.ez_token_transfers WHERE 
+CONTRACT_ADDRESS = '0xc5102fe9359fd9a28f877a67e36b0f050d81a3cc' AND
+(FROM_ADDRESS IN (SELECT user_address FROM claimants) OR 
+ TO_ADDRESS IN (SELECT user_address FROM claimants)) AND 
+BLOCK_NUMBER <= 16400000
+     )
+
+SELECT TX_HASH, FROM_ADDRESS, 
+  CASE
+    WHEN FROM_ADDRESS IN (SELECT DISTINCT address FROM CROSSCHAIN.CORE.ADDRESS_TAGS WHERE BLOCKCHAIN = 'ethereum' AND TAG_NAME IN ('gnosis safe address')) THEN 'gnosis safe'
+    WHEN FROM_ADDRESS IN (SELECT DISTINCT address FROM CROSSCHAIN.CORE.ADDRESS_TAGS WHERE BLOCKCHAIN = 'ethereum' AND TAG_NAME IN ('contract address')) THEN 'contract'
+    WHEN FROM_ADDRESS IN (SELECT DISTINCT address FROM flipside_prod_db.crosschain.address_labels WHERE label_type = 'cex') THEN 'EOA-cex'
+    WHEN FROM_ADDRESS IN (SELECT DISTINCT address FROM CROSSCHAIN.CORE.ADDRESS_TAGS WHERE BLOCKCHAIN = 'ethereum' AND TAG_NAME IN ('active on ethereum last 7')) THEN 'EOA'
+    ELSE 'EOA-0tx'
+END as FROM_ADDRESS_TYPE,
+TO_ADDRESS, 
+  CASE
+    WHEN TO_ADDRESS IN (SELECT DISTINCT address FROM CROSSCHAIN.CORE.ADDRESS_TAGS WHERE BLOCKCHAIN = 'ethereum' AND TAG_NAME IN ('gnosis safe address')) THEN 'gnosis safe'
+    WHEN TO_ADDRESS IN (SELECT DISTINCT address FROM CROSSCHAIN.CORE.ADDRESS_TAGS WHERE BLOCKCHAIN = 'ethereum' AND TAG_NAME IN ('contract address')) THEN 'contract'
+    WHEN TO_ADDRESS IN (SELECT DISTINCT address FROM flipside_prod_db.crosschain.address_labels WHERE label_type = 'cex') THEN 'EOA-cex'
+    WHEN TO_ADDRESS IN (SELECT DISTINCT address FROM CROSSCHAIN.CORE.ADDRESS_TAGS WHERE BLOCKCHAIN = 'ethereum' AND TAG_NAME IN ('active on ethereum last 7')) THEN 'EOA'
+    ELSE 'EOA-0tx'
+END as TO_ADDRESS_TYPE,
+ CONTRACT_ADDRESS, 
+AMOUNT
+FROM transfers
+  "
+}
+
+hop_transfers_by_claimers  <- auto_paginate_query(hop_transfers_query,
+                                                  api_key = readLines("api_key.txt"))
+
+# dex trades specifically 
+hop_trades_query <- { 
+  "
+  -- Airdrop claimants
+   with airdrops AS (
+ -- HOP Claim
+ SELECT LOWER('0xc5102fe9359fd9a28f877a67e36b0f050d81a3cc') as CONTRACT_ADDRESS, 'TOKENSYMBOL' as SYMBOL, LOWER('0x76122903') as ORIGIN_FUNCTION_SIGNATURE FROM DUAL
+),
+
+airdrop_claimants AS (
+SELECT TX_HASH, CONTRACT_ADDRESS, FROM_ADDRESS, TO_ADDRESS, SYMBOL, ORIGIN_FUNCTION_SIGNATURE, AMOUNT, AMOUNT_USD
+  FROM ethereum.core.ez_token_transfers
+WHERE CONTRACT_ADDRESS IN (SELECT CONTRACT_ADDRESS FROM airdrops) AND 
+ORIGIN_FUNCTION_SIGNATURE IN (SELECT ORIGIN_FUNCTION_SIGNATURE FROM airdrops) AND 
+BLOCK_NUMBER <= 16400000
+), 
+
+claimants AS (
+SELECT TO_ADDRESS as user_address, contract_address as token_contract, symbol as token_symbol, 
+SUM(AMOUNT) as claimed_token_volume
+FROM airdrop_claimants
+GROUP BY user_address, token_contract, token_symbol
+)
+
+SELECT TX_HASH, ORIGIN_FROM_ADDRESS as user_address, PLATFORM as protocol, TOKEN_IN, SYMBOL_IN, AMOUNT_IN,
+TOKEN_OUT, SYMBOL_OUT, AMOUNT_OUT
+FROM ETHEREUM.CORE.EZ_DEX_SWAPS
+WHERE BLOCK_NUMBER <= 16400000 AND 
+user_address IN (SELECT user_address FROM claimants) AND 
+(TOKEN_IN = '0xc5102fe9359fd9a28f877a67e36b0f050d81a3cc' OR 
+ TOKEN_OUT = '0xc5102fe9359fd9a28f877a67e36b0f050d81a3cc')  
+  "
+  }
+
+hop_trades_by_claimers <- auto_paginate_query(hop_trades_query,
+                                                  api_key = readLines("api_key.txt"))
+
+```
+
+## Note on Balance
+
+A claimant has a *current balance*. Because liquidity pools automatically match buys and sells of tokens, 
+it is entirely possible for a claimant to have [claimed] + [bought] - [sold] + [received] - [sent] - [deposit] + [withdrawn] HOP tokens and the sum of these values *not* equal their current balance. 
+
+This is because the difference between the [deposit] and [withdrawn] portions of HOP for a liquidity pool position is sold by 
+the pool, not the claimant.
+
+Nonetheless, it is still useful to have all of these values available for each claimant to understand 
+what they've done after receiving their airdrop.
+
+## Buys & Sales 
+
+Trades among claimants where they bought/sold HOP.
+
+```{r, warning = FALSE, message = FALSE}
+buys <- hop_trades_by_claimers %>% 
+  filter(SYMBOL_OUT == "HOP") %>% 
+  group_by(USER_ADDRESS) %>% 
+  summarise(amount_bought = sum(AMOUNT_OUT))
+  
+sales <- hop_trades_by_claimers %>% filter(SYMBOL_IN == "HOP") %>% 
+  group_by(USER_ADDRESS) %>% 
+  summarise(amount_sold = sum(AMOUNT_IN))
+
+
+```
+
+## Deposit into LPs
+
+Transfers to/from known Liquidity Pools that are *not* swaps.
+
+```{r, warning = FALSE, message = FALSE}
+deposits <- hop_transfers_by_claimers %>% filter(
+  (TO_ADDRESS %in% hop_lps$POOL_ADDRESS) & !(TX_HASH %in% hop_trades_by_claimers$TX_HASH) 
+) %>% 
+  mutate(USER_ADDRESS = FROM_ADDRESS) %>% 
+  group_by(USER_ADDRESS) %>% 
+  summarise(amount_deposited_lp = sum(AMOUNT))
+
+withdraws <- hop_transfers_by_claimers %>% filter(
+  (FROM_ADDRESS %in% hop_lps$POOL_ADDRESS) & !(TX_HASH %in% hop_trades_by_claimers$TX_HASH) 
+) %>% 
+  mutate(USER_ADDRESS = TO_ADDRESS) %>% 
+  group_by(USER_ADDRESS) %>% 
+  summarise(amount_withdrawn_lp = sum(AMOUNT))
+
+```
+
+## Simple Transfers 
+
+Transfers from a claimant to/from an Externally Owned Account (EOA, i.e., NOT a contract), excluding 
+known Central Exchange EOAs and including cold storage accounts that have not initiated their own transactions.
+
+```{r, warning = FALSE, message = FALSE}
+
+simple_out <- hop_transfers_by_claimers %>% 
+  filter(FROM_ADDRESS %in% hop_claimers$USER_ADDRESS & 
+           TO_ADDRESS_TYPE %in% c('EOA', 'EOA-0tx'))  %>% 
+  mutate(USER_ADDRESS = FROM_ADDRESS) %>% 
+  group_by(USER_ADDRESS) %>% 
+  summarise(simple_amount_out = sum(AMOUNT)) 
+
+simple_in <- hop_transfers_by_claimers %>%
+  filter(TO_ADDRESS %in% hop_claimers$USER_ADDRESS & 
+           FROM_ADDRESS_TYPE %in% c('EOA', 'EOA-0tx')) %>% 
+  mutate(USER_ADDRESS = TO_ADDRESS) %>% 
+  group_by(USER_ADDRESS) %>% 
+  summarise(simple_amount_in = sum(AMOUNT))
+
+cex_transfers_out <- hop_transfers_by_claimers %>% 
+  filter(FROM_ADDRESS %in% hop_claimers$USER_ADDRESS & 
+           TO_ADDRESS_TYPE %in% c('EOA-cex'))  %>% 
+  mutate(USER_ADDRESS = FROM_ADDRESS) %>% 
+  group_by(USER_ADDRESS) %>% 
+  summarise(cex_transfer_out = sum(AMOUNT))
+
+```
+
+## Airdrop Actions Table 
+
+Merge everything for users (who claimed at least 1 HOP) into final table, swap NAs w/ 0.
+
+```{r, warning = FALSE, message = FALSE}
+
+tbls = list(
+  buys, sales, deposits, withdraws, simple_in, simple_out, cex_transfers_out
+)
+
+for(i in tbls){
+  hop_merge <- merge(hop_merge, all.x = TRUE, y = i, by = "USER_ADDRESS")
+  
+}
+
+hop_merge[is.na(hop_merge)] <- 0
+
+reactable(
+  hop_merge
+)
+
+```
+
+# Claimant Category 
+
+Categorizing claimers based on their post-claim activity; note: for users who might qualify for multiple classes,
+they are given the *first* class they qualify for. For example, a Dumpooor Intermediary would only be classified as a Dumpoooor:
+
+- Keepooooor: Claimed and sat on it w/o providing liquidity  
+    - token_balance >= CLAIMED_TOKEN_VOLUME
+    - amount_bought = 0
+    - amount_sold = 0
+    - amount_deposited_lp = 0
+    
+- Dumpooooor: Claimed and sold everything w/o providing liquidity (if received from another EOA, Maximizer)
+    - token_balance = 0
+    - amount_bought = 0
+    - amount_sold >= CLAIMED_TOKEN_VOLUME
+    - simple_amount_in = 0 
+    - amount_deposited_lp = 0
+
+  - Hedgoooor: Claimed, sold a piece, kept the rest. Never bought, received, provided liquidity
+    - token_balance < CLAIMED_TOKEN_VOLUME 
+    - token_balance > 0
+    - amount_bought = 0
+    - amount_sold < CLAIMED_TOKEN_VOLUME
+    - amount_sold > 0
+    - amount_deposited_lp = 0
+    - simple_amount_in = 0
+
+- Exchangooor: Claimed, sent it all to a central exchange; never bought, received, nor provided liquidity
+   - token-balance = 0
+   - amount_bought = 0 
+   - amount_sold = 0
+   - cex_transfer_out >= CLAIMED_TOKEN_VOLUME
+   - amount_deposited_lp = 0
+
+- Market Maker: Provided liquidity, may or may not have withdrawn and sold later.  
+    - amount_deposited_lp > 0 
+    
+- Trader: Bought and Sold Hop, without having provided liquidity.
+    - amount_bought > 0
+    - amount_sold > 0
+    - amount_deposited_lp = 0
+    
+- Airdrop Maximizer: Received tokens from another EOA AND sold, never providing liquidity nor buying.
+    - amount_bought = 0
+    - amount_sold > 0
+    - simple_amount_in > 0
+    - amount_deposited_lp = 0
+
+- Intermediary: never bought, never provided liquidity; transferred equal or more than it claimed to another EOA. Possibly affiliated with an Airdrop Maximizer.
+    - simple_amount_out >= CLAIMED_TOKEN_VOLUME 
+    - amount_bought = 0 
+    - amount_deposited_lp = 0
+    
+- Undefined: Anyone else, potentially doing a variety of maneuvers and not cleanly fitting into another category. 
+
+
+```{r, warning = FALSE, message = FALSE}
+
+hop_merge <- hop_merge %>% mutate(
+class = case_when(
+  TOKEN_BALANCE >= CLAIMED_TOKEN_VOLUME & 
+    amount_bought == 0 & 
+    amount_sold == 0 & 
+    amount_deposited_lp == 0 ~ "Keepooor",
+  TOKEN_BALANCE == 0 & 
+    amount_bought == 0 & 
+    amount_sold >= CLAIMED_TOKEN_VOLUME & 
+    simple_amount_in == 0 &
+    amount_deposited_lp == 0 ~ "Dumpooor",
+  TOKEN_BALANCE < CLAIMED_TOKEN_VOLUME & 
+    TOKEN_BALANCE > 0 &
+    amount_bought == 0 & 
+    amount_sold < CLAIMED_TOKEN_VOLUME & 
+    amount_sold > 0 & 
+    amount_deposited_lp == 0 & 
+    simple_amount_in == 0 ~ "Hedgooor",
+  TOKEN_BALANCE == 0 & 
+    amount_bought == 0 & 
+    amount_sold == 0 & 
+    cex_transfer_out >= CLAIMED_TOKEN_VOLUME & 
+    amount_deposited_lp == 0 ~ "Exchangooor",
+  amount_deposited_lp > 0 ~ "Market Maker",
+  amount_bought > 0 & 
+    amount_sold > 0 &
+    amount_deposited_lp == 0 ~ "Trader",
+  amount_bought == 0 &
+    amount_sold > 0 & 
+    simple_amount_in > 0 & 
+    amount_deposited_lp == 0 ~ "Maximizooor",
+  simple_amount_out >= CLAIMED_TOKEN_VOLUME &
+    amount_bought == 0 &
+    amount_deposited_lp == 0  ~ "Intermediary",
+  TRUE ~ "Undefined"
+)
+)
+
+class_tbl <- as.data.frame(table(hop_merge$class))
+colnames(class_tbl) <- c("class", "count")
+
+plot_ly(data = class_tbl, x = ~class, y =~count, type = 'bar') %>% 
+  layout(
+    xaxis = list(title = "Claimer Class"),
+    yaxis = list(title = "# of Claimers in Class"),
+    title = list(text = "HOP Airdrop Claimers by Post-Claim Action", y = 0.975)
+  )
+
+```
+
