@@ -4,7 +4,7 @@
 
 For a deeper dive into the context, you can check out the report on our [research site](https://science.flipsidecrypto.xyz/research/) at [hop-drop](https://science.flipsidecrypto.xyz/hopdrop/).
 
-If you aren't interested in code and want the short summary of the drop, you can check out the email sized [hop-drop](https://flipsidecrypto.beehiiv.com/p/hop-drop) on our research beehiiv and subscribe to get (summaries of) the best crypto research direct to your inbox.
+If you aren't interested in code and want the short summary of the drop, you can check out the email sized [hop-drop](https://flipsidecrypto.beehiiv.com/p/free-money) on our research beehiiv and subscribe to get (summaries of) the best crypto research direct to your inbox.
 
 # Reproduce Analysis
 
